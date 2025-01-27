@@ -1,0 +1,118 @@
+#Python program for Amharic to English NMT using BERT
+
+import tensorflow as tf
+from transformers import BertTokenizer, TFBertModel
+from sklearn.model_selection import train_test_split
+from nltk.translate.bleu_score import corpus_bleu
+import numpy as np
+
+# File path
+parallel_file = "C:/Users/HPC2024/Desktop/Habib/AmhEng.txt"
+
+#parallel sentences(Amharic to English)
+def read_parallel_sentences(file_path):
+    amharic_sentences = []
+    english_sentences = []
+    with open(file_path, 'r', encoding='utf-8') as file:
+        for line in file.readlines():
+            # Assuming sentences are separated by a tab or a specific delimiter (e.g., '\t')
+            parts = line.strip().split('\t')  # Modify if different delimiter is used
+            if len(parts) == 2:
+                amharic_sentences.append(parts[0])
+                english_sentences.append(parts[1])
+    return amharic_sentences, english_sentences
+
+#Amharic and English sentence
+amharic_sentences, english_sentences = read_parallel_sentences(parallel_file)
+assert len(amharic_sentences) == len(english_sentences), "Mismatch in number of sentences."
+
+# Tokenizer
+bert_tokenizer = BertTokenizer.from_pretrained("bert-base-multilingual-cased")
+vocab_size = bert_tokenizer.vocab_size
+max_length = 50
+
+# Tokenization
+def tokenize(sentences):
+    return bert_tokenizer(
+        sentences,
+        padding="max_length",
+        truncation=True,
+        max_length=max_length,
+        return_tensors="tf"
+    )
+
+amharic_tokens = tokenize(amharic_sentences)
+english_tokens = tokenize(english_sentences)
+
+amharic_input_ids = amharic_tokens['input_ids'].numpy()
+english_input_ids = english_tokens['input_ids'].numpy()
+
+#Spliting data into training and validation sets
+train_input_ids, val_input_ids, train_labels, val_labels = train_test_split(
+    amharic_input_ids,
+    english_input_ids,
+    test_size=0.2,
+    random_state=42
+)
+
+train_input_ids = tf.convert_to_tensor(train_input_ids)
+val_input_ids = tf.convert_to_tensor(val_input_ids)
+train_labels = tf.convert_to_tensor(train_labels)
+val_labels = tf.convert_to_tensor(val_labels)
+
+#NMT Model
+class NMTModel(tf.keras.Model):
+    def __init__(self, vocab_size):
+        super(NMTModel, self).__init__()
+        self.encoder = TFBertModel.from_pretrained("bert-base-multilingual-cased")
+        self.dense = tf.keras.layers.Dense(512, activation='relu')
+        self.output_layer = tf.keras.layers.Dense(vocab_size)
+
+    def call(self, input_ids):
+        encoder_output = self.encoder(input_ids).last_hidden_state
+        x = self.dense(encoder_output)
+        return self.output_layer(x)
+
+#Instantiate the model
+nmt_model = NMTModel(vocab_size=vocab_size)
+
+#Compile the model
+nmt_model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=5e-5),
+    loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+    metrics=['accuracy']
+)
+
+#Training
+nmt_model.fit(
+    train_input_ids, train_labels,
+    validation_data=(val_input_ids, val_labels),
+    batch_size=32,
+    epochs=5
+)
+
+#Model Evaluate
+val_loss, val_accuracy = nmt_model.evaluate(val_input_ids, val_labels)
+print(f"Validation Loss: {val_loss}")
+print(f"Validation Accuracy: {val_accuracy}")
+
+predictions = nmt_model.predict(val_input_ids)
+predicted_ids = tf.argmax(predictions, axis=-1).numpy()
+
+def decode_sequences(input_ids):
+    return [bert_tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
+
+predicted_sentences = decode_sequences(predicted_ids)
+reference_sentences = decode_sequences(val_labels.numpy())
+
+#BLEU calculation
+references = [[ref.split()] for ref in reference_sentences]
+candidates = [pred.split() for pred in predicted_sentences]
+bleu_score = corpus_bleu(references, candidates)
+print(f"Corpus BLEU Score: {bleu_score}")
+
+#sample translations
+for i in range(5):
+    print(f"Amharic Input: {bert_tokenizer.decode(val_input_ids[i].numpy(), skip_special_tokens=True)}")
+    print(f"Reference Translation: {reference_sentences[i]}")
+    print(f"Predicted Translation: {predicted_sentences[i]}\n")
