@@ -1,0 +1,119 @@
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Embedding, LSTM, Dense, Attention, Concatenate
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from nltk.translate.bleu_score import corpus_bleu
+
+# Data loading and preprocessing
+def load_data(eng_file, amh_file):
+    with open(eng_file, 'r', encoding='utf-8') as eng_f, open(amh_file, 'r', encoding='utf-8') as amh_f:
+        eng_sentences = [f"<start> {line.strip()} <end>" for line in eng_f]
+        amh_sentences = [line.strip() for line in amh_f]
+    return eng_sentences, amh_sentences
+
+def tokenize(sentences, num_words=None):
+    tokenizer = Tokenizer(num_words=num_words, filters='')
+    tokenizer.fit_on_texts(sentences)
+    sequences = tokenizer.texts_to_sequences(sentences)
+    return sequences, tokenizer
+
+# Load the data
+eng_file = "C:/Users/HPC2024/Desktop/Habib/Eng.txt"
+amh_file = "C:/Users/HPC2024/Desktop/Habib/Amh.txt"
+eng_sentences, amh_sentences = load_data(eng_file, amh_file)
+
+# Tokenize sentences
+eng_sequences, eng_tokenizer = tokenize(eng_sentences)
+eng_vocab_size = len(eng_tokenizer.word_index) + 1
+max_eng_len = max(len(seq) for seq in eng_sequences)
+
+amh_sequences, amh_tokenizer = tokenize(amh_sentences)
+amh_vocab_size = len(amh_tokenizer.word_index) + 1
+max_amh_len = max(len(seq) for seq in amh_sequences)
+
+# Pad sequences
+eng_sequences = pad_sequences(eng_sequences, maxlen=max_eng_len, padding='post')
+amh_sequences = pad_sequences(amh_sequences, maxlen=max_amh_len, padding='post')
+
+# Prepare decoder input and target data
+decoder_input_data = pad_sequences(amh_sequences[:, :-1], maxlen=max_amh_len - 1, padding='post')
+decoder_target_data = pad_sequences(amh_sequences[:, 1:], maxlen=max_amh_len - 1, padding='post')
+decoder_target_data = np.expand_dims(decoder_target_data, -1)
+
+# Model definition
+def build_model(eng_vocab_size, amh_vocab_size, max_eng_len, max_amh_len, embedding_dim=256, lstm_units=512):
+    # Encoder
+    encoder_inputs = Input(shape=(max_eng_len,))
+    encoder_embedding = Embedding(eng_vocab_size, embedding_dim)(encoder_inputs)
+    encoder_lstm = LSTM(lstm_units, return_sequences=True, return_state=True)
+    encoder_outputs, state_h, state_c = encoder_lstm(encoder_embedding)
+    encoder_states = [state_h, state_c]
+
+    # Decoder
+    decoder_inputs = Input(shape=(max_amh_len - 1,))
+    decoder_embedding = Embedding(amh_vocab_size, embedding_dim)(decoder_inputs)
+    decoder_lstm = LSTM(lstm_units, return_sequences=True, return_state=True)
+    decoder_outputs, _, _ = decoder_lstm(decoder_embedding, initial_state=encoder_states)
+
+    # Attention mechanism
+    attention = Attention()
+    context_vector = attention([decoder_outputs, encoder_outputs])
+    decoder_combined_context = Concatenate(axis=-1)([decoder_outputs, context_vector])
+
+    # Dense layer for final output
+    decoder_dense = Dense(amh_vocab_size, activation='softmax')
+    decoder_final_output = decoder_dense(decoder_combined_context)
+
+    # Define the model
+    model = Model([encoder_inputs, decoder_inputs], decoder_final_output)
+    return model
+
+# Build and compile the model
+model = build_model(eng_vocab_size, amh_vocab_size, max_eng_len, max_amh_len)
+model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+
+# Train the model
+model.fit(
+    [eng_sequences, decoder_input_data],
+    decoder_target_data,
+    batch_size=16,
+    epochs=5,
+    validation_split=0.2
+)
+
+# Save the model
+model.save("eng_to_amh_attention_model.h5")
+
+# BLEU score evaluation
+def evaluate_bleu(model, eng_sequences, amh_sequences, amh_tokenizer):
+    references, hypotheses = [], []
+    max_decoder_seq_len = amh_sequences.shape[1] - 1
+
+    for i in range(len(eng_sequences)):
+        input_seq = np.expand_dims(eng_sequences[i], axis=0)
+        decoder_input = np.zeros((1, max_decoder_seq_len))
+        decoder_input[0, 0] = amh_tokenizer.word_index['<start>']
+
+        translated_sentence = []
+        for t in range(max_decoder_seq_len):
+            preds = model.predict([input_seq, decoder_input])
+            pred_id = np.argmax(preds[0, t, :])
+            if pred_id == amh_tokenizer.word_index['<end>']:
+                break
+            translated_sentence.append(pred_id)
+            decoder_input[0, t + 1] = pred_id
+
+        # Prepare BLEU inputs
+        reference = [amh_sequences[i, 1:-1]]  # Remove <start> and <end>
+        hypothesis = translated_sentence
+        references.append(reference)
+        hypotheses.append(hypothesis)
+
+    # Compute corpus BLEU score
+    return corpus_bleu(references, hypotheses)
+
+# Compute BLEU score
+bleu_score = evaluate_bleu(model, eng_sequences, amh_sequences, amh_tokenizer)
+print(f"BLEU Score: {bleu_score:.4f}")
